@@ -6,22 +6,22 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#001B2E" // Dark Blue background
+        color: "#001B2E"
 
         Text {
-            text: "CAPTURE SCREEN"
+            text: "Camera feed will appear here"
             color: "white"
             font.pixelSize: 24
             anchors.centerIn: parent
         }
 
         Button {
-            text: "TAKE PHOTO"
+            text: "Capture Image"
             anchors.bottom: parent.bottom
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.margins: 40
 
-            onClicked: console.log("Capture triggered!")
+            onClicked: console.log("Image captured!")   
         }
     }
 }
