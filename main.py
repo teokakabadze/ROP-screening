@@ -25,12 +25,8 @@ def main():
     root = engine.rootObjects()[0]
     video_output = root.findChild(QObject, "cameraFeed")
     
-    if video_output is not None:
-        capture_session.setVideoOutput(video_output)
-        camera.start()
-    else:
-        print("Failed to find the video output in QML.")
-        sys.exit(-1)
+    capture_session.setVideoOutput(video_output)
+    camera.start()
         
     print("ROP App Started successfully.")
     sys.exit(app.exec())
