@@ -14,7 +14,7 @@ Item {
         Rectangle {
             Layout.fillWidth: true
             color: "#f8f9fa"
-            Layout.preferredHeight: 50
+            Layout.preferredHeight: 50 // maybe dont make it fixed in the future
 
             RowLayout {
                 anchors.fill: parent
@@ -24,12 +24,10 @@ Item {
                 Text {
                     text: "ROP Screening"
                     font.pixelSize: 20
-                    color: "#2c3e50"
+                    color: '#38526b'
                     Layout.alignment: Qt.AlignVCenter
                 }
-
                 Item { Layout.fillWidth: true }
-
                 Row {
                     spacing: 8
                     Layout.alignment: Qt.AlignVCenter
@@ -51,25 +49,35 @@ Item {
         }
 
         // capture button
-        Rectangle {
+        Button {
+            id: captureButton
             Layout.fillWidth: true
-            color: "#eeeeee"
-            Layout.preferredHeight: 80
+            Layout.preferredHeight: 50
+            Layout.leftMargin: 20
+            Layout.rightMargin: 20
+
+            Text {
+                text: "📷  Capture Image"  
+                font.pixelSize: 20         
+                anchors.centerIn: parent    
+            }
+
+            background: Rectangle {
+                implicitWidth: 100; implicitHeight: 60
+                radius: 8
+                
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#007bff" }
+                    GradientStop { position: 1.0; color: "#00a8cc" }
+                }
+            }
+            opacity: captureButton.pressed ? 0.8 : 1.0
         }
         /* VideoOutput {
             id: cameraFeed
             objectName: "cameraFeed"
             anchors.fill: parent
             // fillMode: VideoOutput.PreserveAspectCrop if we want to maintain the circular eye shape
-        }
-
-        Button {
-            text: "Capture Image"
-            anchors.bottom: parent.bottom
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.margins: 40
-
-            onClicked: console.log("Image captured!")   
         } */
     }
 }

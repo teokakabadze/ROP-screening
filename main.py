@@ -8,6 +8,7 @@ from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices
 
 def main():
     app = QGuiApplication(sys.argv)
+    os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
     engine = QQmlApplicationEngine()
 
     qml_file = Path(__file__).parent / "ui" / "main.qml"
