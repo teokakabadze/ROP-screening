@@ -1,19 +1,22 @@
 import QtQuick
 import QtQuick.Controls
+import QtMultimedia
 
 Item {
     id: captureRoot
 
-    Rectangle {
+    VideoOutput {
+        id: cameraFeed
+        objectName: "cameraFeed"
         anchors.fill: parent
-        color: "#001B2E"
+        // fillMode: VideoOutput.PreserveAspectCrop if we want to maintain the circular eye shape
 
-        Text {
+        /* Text {
             text: "Camera feed will appear here"
-            color: "white"
+            color: "black"
             font.pixelSize: 24
             anchors.centerIn: parent
-        }
+        } */
 
         Button {
             text: "Capture Image"
