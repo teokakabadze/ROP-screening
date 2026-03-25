@@ -43,7 +43,6 @@ Button {
 
     // when clicked, trigger the capture function in CapturePage
     onClicked: {
-        console.log("Capture button clicked")
-        captureRoot.captureImage()
+        cameraManager.capture()
     }
 }

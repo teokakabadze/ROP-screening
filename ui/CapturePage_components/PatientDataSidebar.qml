@@ -55,7 +55,7 @@ Rectangle {
             }
         }
 
-        // --- SECTION 2: Image Gallery ---
+        // Image Gallery
         ColumnLayout {
             Layout.fillHeight: true 
             spacing: 8

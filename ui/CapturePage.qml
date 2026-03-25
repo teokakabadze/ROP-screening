@@ -68,10 +68,6 @@ Item {
                                 }
                             }
 
-                            function captureImage() {
-                                console.log("captureImage function called in CapturePage.qml")
-                                //cameraContainer.children[0].captureCurrentFrame() // Assuming CameraFeed is the first child
-                            }
                             // capture button
                             CaptureButton {
                                 anchors.horizontalCenter: parent.horizontalCenter
@@ -79,8 +75,7 @@ Item {
                                 width: parent.width * 0.95
                                 height: 38
                                 anchors.margins: 10
-                            } 
-
+                            }
                         }
                     }
                 }
