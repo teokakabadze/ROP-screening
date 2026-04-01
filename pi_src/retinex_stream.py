@@ -162,7 +162,7 @@ def _make_probe(frame_interval=333333):
         "<HBBIHHHHHIIIBBBB",
         0x0000,          # bmHint
         1,               # bFormatIndex  (MJPEG format, index 1 in gadget descriptor)
-        3,               # bFrameIndex   (1080p = index 3; 720p=2, 480p=1)
+        3,               # bFrameIndex   (1080p = index 3; 720p=2, 480p=1 — configfs assigns in CREATION ORDER)
         frame_interval,  # dwFrameInterval (100 ns units, 333333 = 30fps)
         0, 0, 0, 0,      # wKeyFrameRate, wPFrameRate, wCompQuality, wCompWindowSize
         0,               # wDelay
@@ -555,6 +555,18 @@ class RetinexStreamer:
                 # Camera left running — ready for next host connection
             elif ev.type == UVC_EVENT_SETUP:
                 self._handle_setup(ev, bytes(ev.data[4:12]))
+            elif ev.type == UVC_EVENT_DATA:
+                # ev.data = uvc_request_data: [0:4]=length, [4:64]=UVC data
+                # UVC probe: bmHint[0:2], bFormatIndex[2], bFrameIndex[3], dwFrameInterval[4:8]
+                # → in ev.data: offset 4+2=6 for bFormatIndex, 7 for bFrameIndex, 8:12 for interval
+                data = bytes(ev.data[:12])
+                if len(data) >= 12:
+                    fmt_idx = data[6]
+                    frm_idx = data[7]
+                    interval = int.from_bytes(data[8:12], "little")
+                    fps = round(10_000_000 / interval) if interval else 0
+                    log.info("UVC COMMIT data: bFormatIndex=%d bFrameIndex=%d interval=%d (~%dfps)",
+                             fmt_idx, frm_idx, interval, fps)
             elif ev.type == UVC_EVENT_STREAMON:
                 log.info("UVC STREAMON")
                 with self._lock:

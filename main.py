@@ -2,12 +2,13 @@ import sys
 import os
 import time
 import threading
+os.environ["QT_MEDIA_BACKEND"] = "windows"  # must be set before any Qt imports
 sys.stdout.reconfigure(line_buffering=True)
 from pathlib import Path
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtCore import QObject, Slot, Signal
-from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices, QImageCapture
+from PySide6.QtCore import QObject, Slot, Signal, QSize
+from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices, QImageCapture, QVideoFrameFormat
 from PySide6.QtCore import QUrl
 
 from backend.device_manager import DeviceManager
@@ -65,7 +66,6 @@ def _find_retinex_camera():
 
 
 def main():
-    os.environ["QT_MEDIA_BACKEND"] = "windows"  # force Media Foundation; FFmpeg mishandles UVC MJPEG
     app = QGuiApplication(sys.argv)
     os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
     engine = QQmlApplicationEngine()
@@ -76,6 +76,24 @@ def main():
     cam_info = _find_retinex_camera()
     print(f"Using camera: {cam_info.description()}")
     camera = QCamera(cam_info)
+    formats = cam_info.videoFormats()
+    print(f"Camera formats ({len(formats)}):")
+    for fmt in formats:
+        print(f"  {fmt.resolution().width()}x{fmt.resolution().height()} "
+              f"{fmt.maxFrameRate():.1f}fps {fmt.pixelFormat()}")
+    best = None
+    for fmt in formats:
+        r = fmt.resolution()
+        if r.width() == 1920 and r.height() == 1080 and fmt.maxFrameRate() >= 14.0:
+            best = fmt
+            break
+    if best is None and formats:
+        # Fallback: pick highest-resolution format
+        best = max(formats, key=lambda f: f.resolution().width() * f.resolution().height())
+    if best:
+        camera.setCameraFormat(best)
+        r = best.resolution()
+        print(f"Set camera format: {r.width()}x{r.height()} {best.maxFrameRate():.0f}fps")
     capture_session = QMediaCaptureSession()
     capture_session.setCamera(camera)
     image_capture = QImageCapture()
