@@ -42,6 +42,6 @@ Button {
     }
 
     onClicked: {
-        deviceManager.triggerCapture()
+        cameraManager.triggerCapture()
     }
 }

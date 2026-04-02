@@ -75,7 +75,6 @@ class DeviceManager(QObject):
 
     def _scan_ports(self):
         ports = QSerialPortInfo.availablePorts()
-        print(f"[DeviceManager] scanning {len(ports)} port(s): {[f'{p.portName()} VID={p.vendorIdentifier():#06x} PID={p.productIdentifier():#06x}' for p in ports]}")
         for info in ports:
             if (info.vendorIdentifier()  == _GADGET_VID and
                     info.productIdentifier() == _GADGET_PID):
