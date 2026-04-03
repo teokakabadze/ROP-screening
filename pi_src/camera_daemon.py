@@ -19,6 +19,7 @@ import logging
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from picamera2 import Picamera2
 from PIL import Image
+import simplejpeg
 
 logging.basicConfig(
     level=logging.INFO,
@@ -206,18 +207,19 @@ def preview_loop():
 # ---------- capture ----------
 def do_capture():
     """
-    Full-resolution JPEG capture via hardware encoder (bcm2835_codec MJPEGEncoder).
+    Full-resolution JPEG capture via simplejpeg (fastdct, YCbCr/420).
 
     Phase 1 (hold _cam_lock):
-      - Lock AE, AWB, and AF position from running video frame
-      - Stop video, switch to still mode, capture_file() → hardware JPEG
+      - Lock AE, AWB, AF from running video frame
+      - Stop video, switch to still mode
+      - capture_request(flush=True) → make_array() → req.release()
       - Stop still, compact CMA, reconfigure video (don't start yet)
-      - Release _cam_lock
+      - Release _cam_lock  ← released before encode; preview can recover sooner
 
     Phase 2 (parallel, no locks):
       - Restore thread: acquire _cam_lock → cam.start(video) + re-enable AF
-      - Main thread: read JPEG from /tmp → TCP send to Windows
-      Both run concurrently; main waits for restore before releasing capture_lock.
+      - Main thread: simplejpeg.encode_jpeg(arr, fastdct=True) → TCP push
+      Both run concurrently; encode and video restore overlap.
 
     Windows receives RETINEX header with format=jpeg → saves directly, skips ISP.
     """
@@ -228,9 +230,9 @@ def do_capture():
     colour_gains = (2.278, 1.319)
     evt_to_send = None
     phase1_ok = False
-    t0 = t1 = t2 = t3 = 0.0
+    t0 = t1 = _t_req = t3 = 0.0
+    jpeg_direct = None
 
-    # Snapshot CMA state before acquiring lock; reset flag so next capture re-checks
     global _cma_clean
     _cma_clean_snapshot = _cma_clean
     _cma_clean = False
@@ -245,8 +247,6 @@ def do_capture():
         t0 = time.perf_counter()
 
         # Snapshot and lock AE/AWB/AF from the current video frame.
-        # Locking in video mode means controls propagate before we stop,
-        # so no extra sleep is needed after starting still mode.
         meta = None
         lens_pos = 0.0
         try:
@@ -276,35 +276,45 @@ def do_capture():
         log.info("Capture: switching to still mode...")
         cam.stop()
         if not _cma_clean_snapshot:
-            # CMA not pre-compacted — trigger and wait (fallback path)
             try:
                 with open("/proc/sys/vm/compact_memory", "w") as _f:
                     _f.write("1")
             except OSError:
                 pass
-            time.sleep(0.25)  # wait for async CMA compaction to complete
-        # Embed AE-lock controls so they apply from frame 1.
-        # For 48MP (6944×6944): also apply ScalerCrop to square-crop the sensor.
-        # For 16MP (4624×3472): full 2×2 binned mode — no crop needed.
+            time.sleep(0.25)
+
+        # Build still config controls — all baked in so they apply from frame 1.
+        # For 48MP (6944×6944): ScalerCrop squares the sensor.
+        # For 16MP (4624×3472): 2×2 binned mode, no crop needed.
         _still_cfg = still_config.copy()
         _sw, _sh = cam.sensor_resolution
-        _ctrl = {}
+        min_fd, _, _ = cam.camera_controls.get("FrameDurationLimits", (100_000, 10_000_000, 100_000))
+        _ctrl = {
+            "NoiseReductionMode":   0,          # disable ISP NR — reduces req_wait
+            "FrameDurationLimits":  (min_fd, min_fd),  # run sensor as fast as possible
+        }
         if _capture_size == (6944, 6944):
             _crop_x = (_sw - _sh) // 2   # = (9248-6944)//2 = 1152
             _ctrl["ScalerCrop"] = (_crop_x, 0, _sh, _sh)
         if meta is not None:
-            _ctrl["AeEnable"] = False
+            _ctrl["AeEnable"]    = False
             _ctrl["ExposureTime"] = meta["ExposureTime"]
             _ctrl["AnalogueGain"] = meta["AnalogueGain"]
+            _ctrl["AwbEnable"]   = False
+            _ctrl["ColourGains"] = colour_gains
         _still_cfg["controls"] = _ctrl
         cam.configure(_still_cfg)
-        min_fd, _, _ = cam.camera_controls.get("FrameDurationLimits", (100_000, 10_000_000, 100_000))
-        cam.set_controls({"FrameDurationLimits": (min_fd, min_fd)})
         cam.start()
 
         t1 = time.perf_counter()
-        from picamera2.encoders import JpegEncoder as _JEnc
-        _enc = _JEnc(num_threads=4, q=75)
+
+        # Capture one fresh frame and encode to JPEG in-place (zero-copy via MappedArray).
+        # fastdct=True skips the precise DCT (~15% speedup, imperceptible on clinical images).
+        # Encode happens here in Phase 1, serialised with camera ops but contention-free
+        # (no competing threads). Wind-down follows immediately after.
+        from picamera2.encoders import JpegEncoder as _JpegEncoder
+        _enc = _JpegEncoder(q=75)
+        _enc.fastdct = True
         _req = cam.capture_request(flush=True)
         _t_req = time.perf_counter()
         try:
@@ -312,10 +322,6 @@ def do_capture():
         finally:
             _req.release()
         _t_enc = time.perf_counter()
-        with open("/tmp/retinex_cap.jpg", "wb") as _jf:
-            _jf.write(jpeg_direct)
-        t2 = time.perf_counter()
-        log.info(f"Capture: mode_switch={t1-t0:.2f}s  req_wait={_t_req-t1:.2f}s  enc={_t_enc-_t_req:.2f}s  total_jpeg={t2-t1:.2f}s  size={len(jpeg_direct)//1024}kB")
 
         cam.stop()
         try:
@@ -323,7 +329,7 @@ def do_capture():
                 f.write("1")
         except OSError:
             pass
-        cam.configure(video_config)   # configure only — start happens in Phase 2 thread
+        cam.configure(video_config)   # configure only — cam.start() in Phase 2 thread
         t3 = time.perf_counter()
         phase1_ok = True
 
@@ -338,7 +344,7 @@ def do_capture():
             log.error(f"Failed to restore video mode: {e2}")
         evt_to_send = "EVT:STATUS:capture_error"
     finally:
-        _cam_lock.release()   # preview loop resumes; will get errors until cam.start() in Phase 2
+        _cam_lock.release()   # released before encode; restore thread and preview can proceed
 
     if not phase1_ok:
         capture_lock.release()
@@ -346,7 +352,15 @@ def do_capture():
             _send_evt(evt_to_send)
         return
 
-    # ── Phase 2: restore video ‖ read JPEG + send (parallel) ─────────────────
+    log.info(
+        f"Capture: mode_switch={t1-t0:.2f}s  "
+        f"req_wait={_t_req-t1:.2f}s  "
+        f"enc={_t_enc-_t_req:.2f}s  "
+        f"wind_down={t3-_t_enc:.2f}s  "
+        f"size={len(jpeg_direct)//1024}kB"
+    )
+
+    # ── Phase 2: restore video ‖ encode + send (parallel) ────────────────────
     def _restore_video():
         if not _cam_lock.acquire(timeout=5.0):
             log.error("Restore: camera lock timeout — preview may be stuck")
@@ -355,7 +369,6 @@ def do_capture():
             cam.start()
             cam.set_controls({"AfMode": 2, "AfSpeed": 1})
             log.info("Capture: video mode restored")
-            # Pre-compact CMA now so next capture can skip the 0.25s wait
             threading.Thread(target=_compact_cma_async, daemon=True).start()
         except Exception as e:
             log.error(f"Restore failed: {e}", exc_info=True)
@@ -366,28 +379,30 @@ def do_capture():
     restore_thread.start()
 
     try:
-        with open("/tmp/retinex_cap.jpg", "rb") as f:
-            jpeg_bytes = f.read()
-        t4 = time.perf_counter()
-        log.info(
-            f"Capture: compact+reconf={t3-t2:.2f}s  "
-            f"read={t4-t3:.2f}s  {len(jpeg_bytes)/1e6:.1f}MB — sending..."
-        )
         header = (
             f"RETINEX:r_gain={colour_gains[0]:.4f},b_gain={colour_gains[1]:.4f},format=jpeg\n"
         ).encode()
-        with socket.create_connection((WINDOWS_IP, CAPTURE_PORT), timeout=60) as s:
-            s.sendall(header)
-            s.sendall(jpeg_bytes)
+        _MAX_SEND_ATTEMPTS = 3
+        for _attempt in range(_MAX_SEND_ATTEMPTS):
+            try:
+                with socket.create_connection((WINDOWS_IP, CAPTURE_PORT), timeout=60) as s:
+                    s.sendall(header)
+                    s.sendall(jpeg_direct)
+                break
+            except ConnectionResetError as _e:
+                if _attempt < _MAX_SEND_ATTEMPTS - 1:
+                    log.warning(f"Capture: send reset (attempt {_attempt + 1}/{_MAX_SEND_ATTEMPTS}), retrying in 1.5s...")
+                    time.sleep(1.5)
+                else:
+                    raise
         t5 = time.perf_counter()
         log.info(
             f"Capture done: total={t5-t0:.2f}s "
-            f"(lock+switch={t1-t0:.2f}s encode={t2-t1:.2f}s "
-            f"compact={t3-t2:.2f}s read={t4-t3:.2f}s send={t5-t4:.2f}s)"
+            f"(cam+enc={t3-t0:.2f}s send={t5-t3:.2f}s)"
         )
-        evt_to_send = "EVT:CAPTURED:6944x6944"
+        evt_to_send = f"EVT:CAPTURED:{_capture_size[0]}x{_capture_size[1]}"
     except Exception as e:
-        log.error(f"Capture failed (send phase): {e}", exc_info=True)
+        log.error(f"Capture failed (encode/send phase): {e}", exc_info=True)
         evt_to_send = "EVT:STATUS:capture_error"
 
     restore_thread.join()
@@ -502,6 +517,16 @@ def main():
     log.info(f"Camera started: {PREVIEW_W}x{PREVIEW_H} RGB888")
     # Pre-compact CMA now so the first capture can skip the 0.25s wait
     threading.Thread(target=_compact_cma_async, daemon=True).start()
+
+    # Set CPU governor to performance so encode runs at full clock speed.
+    # Pi Zero 2W defaults to powersave (600MHz); performance pins all cores to 1GHz.
+    for _cpu in range(4):
+        try:
+            with open(f"/sys/devices/system/cpu/cpu{_cpu}/cpufreq/scaling_governor", "w") as _f:
+                _f.write("performance")
+        except OSError:
+            pass
+    log.info("CPU: performance governor set")
 
     # Load hardware JPEG codec AFTER camera pipeline is running.
     # bcm2835_codec conflicts with Unicam init if loaded at boot (hence blacklisted);

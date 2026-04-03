@@ -1,331 +1,69 @@
-Looking at your setup carefully — `receive_image.py` already handles 10-bit packed Bayer well, and the Arducam 64MP OV64A40 outputs 9248×6944 @ 10-bit packed = **~76 MB per raw frame**. Let me break down every bottleneck and give you a full decision tree.
+The images clearly confirm the problem. The 16MP capture  shows a clean, properly exposed image with no color artifacts. The 64MP capture  has severe **horizontal magenta banding** covering the entire frame — every row is tinted with alternating magenta/dark lines at a fixed frequency.[1][2]
 
----
+## What the Banding Pattern Tells You
 
-## Root Cause Audit
+The **horizontal line pattern** (not random noise, but periodic rows) is the key diagnostic clue. This is almost never a white balance or AWB issue — it is a **black level / pixel readout timing issue** specific to the full-resolution mode. In the OV64A40, full 64MP uses a different readout path than the 4×4 binned 16MP mode, and the black level subtraction must be recalibrated for that path.
 
-| Problem | Root Cause | Time Cost |
-|---|---|---|
-| UVC stream must die before capture | Single camera handle; `uvc-gadget` holds `/dev/video0` | ~2–4s (kill + re-enum) |
-| Windows drops USB device on restart | UVC gadget re-enumerates when killed/restarted | 3–8s Windows re-detection |
-| `rpicam-still` encode delay | JPEG/PNG encode at 64MP is CPU-bound on A53 | ~6–9s |
-| `rpicam-raw` can't stdout | libcamera seeks the output fd; pipes aren't seekable | blocks stdout path entirely |
-| SD card write for raw | Workaround for stdout bug; SDIO ~20–25 MB/s + wear | ~3–4s write + latency |
-| 32-bit CMA limit | 32-bit kernel: max contiguous DMA ~256MB; ISP buffers compete | corrupted/failed captures at full res |
+## Most Likely Cause: BLC (Black Level Correction) Mismatch
 
----
+In the 64MP mode, the sensor reads all rows without pixel binning. The black reference rows and their subtraction coefficients differ from binned mode. If BLC is not properly initialized for the full-res mode, **every other Gr/Gb row gets a wrong offset**, which after demosaicing produces the characteristic horizontal magenta stripes (red+blue elevated, green suppressed on alternating rows).
 
-## Option Ranking (best to worst)
+## What to Fix in `ov64a40.c`
 
----
+### 1. Enable Auto BLC for 64MP mode
 
-### ✅ Option 1 — Recommended: MJPEG-over-NCM preview + picamera2 unified daemon
+In your 64MP-specific register table, add or verify:
 
-**Core idea:** Ditch the UVC gadget entirely. Preview goes over the existing USB NCM (ethernet-over-USB) as an MJPEG HTTP stream. The USB device never re-enumerates. A single `picamera2` daemon owns the camera forever and handles both preview and raw capture.
-
-**Step 0 — Switch to 64-bit RPiOS Lite first**
-This is mandatory before anything else. 32-bit limits CMA to 256MB; the 64MP sensor's ISP pipeline needs large contiguous buffers. 64-bit fixes this and gives you access to all 512MB.
-
-```bash
-# In /boot/firmware/config.txt (bookworm) or /boot/config.txt (bullseye)
-arm_64bit=1
-# No other CMA tweak needed after this
+```c
+{ CCI_REG8(0x4000), 0x27 }, /* BLC: enable auto, apply to all channels */
+{ CCI_REG8(0x4001), 0x03 }, /* BLC start line */
+{ CCI_REG8(0x4002), 0x45 }, /* BLC auto mode */
 ```
 
-**Step 1 — Kill the UVC gadget dependency**
+The value `0x27` enables automatic black level calibration. If this was previously `0x00` or missing from the 64MP table, BLC is off and the raw pixel values are uncorrected.
 
-On Windows, install VLC. Preview URL will be `http://10.42.0.1:8080/stream.mjpg` (or whatever your NCM IP is). This means you never lose the USB device — NCM/CDC-ACM are unaffected by camera process restarts.
+### 2. Set Per-Channel Black Level Offsets
 
-**Step 2 — The unified daemon (`camera_daemon.py` on Pi)**
+The registers `0x4030`–`0x4037` are the per-channel BLC offsets (R, Gr, Gb, B × 2 bytes each). For the 64MP mode, try:
 
-```python
-#!/usr/bin/env python3
-"""
-camera_daemon.py
-- Streams low-res MJPEG over HTTP for preview
-- Listens on serial (or TCP) for 'CAPTURE' command
-- On capture: grabs full-res raw array from picamera2 (no SD write)
-- Streams 10-bit packed Bayer directly to waiting nc/receive_image.py on Windows
-"""
-import io, socket, struct, threading, time, serial
-import numpy as np
-from picamera2 import Picamera2
-from picamera2.outputs import FileOutput
-from picamera2.encoders import MJPEGEncoder
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-PREVIEW_PORT = 8080
-CAPTURE_HOST = "10.42.0.1"   # Windows NCM IP
-CAPTURE_PORT = 9999
-SERIAL_DEV   = "/dev/ttyGS0"  # USB CDC-ACM gadget serial
-
-cam = Picamera2()
-
-# Dual-stream config: low-res preview + full-res raw
-config = cam.create_still_configuration(
-    main={"size": (1920, 1080), "format": "YUV420"},   # preview
-    raw={"size": cam.sensor_resolution},               # full 9248x6944
-    buffer_count=2,
-)
-cam.configure(config)
-
-# --- MJPEG preview server ---
-class StreamOutput(io.BufferedIOBase):
-    def __init__(self):
-        self.frame = None
-        self.condition = threading.Condition()
-    def write(self, buf):
-        with self.condition:
-            self.frame = buf
-            self.condition.notify_all()
-
-class StreamHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=FRAME')
-        self.end_headers()
-        try:
-            while True:
-                with output.condition:
-                    output.condition.wait()
-                    frame = output.frame
-                self.wfile.write(b'--FRAME\r\n')
-                self.send_header('Content-Type', 'image/jpeg')
-                self.send_header('Content-Length', len(frame))
-                self.end_headers()
-                self.wfile.write(frame)
-                self.wfile.write(b'\r\n')
-        except Exception:
-            pass
-    def log_message(self, *a): pass
-
-output = StreamOutput()
-encoder = MJPEGEncoder(bitrate=4_000_000)
-encoder.output = FileOutput(output)
-
-cam.start_encoder(encoder, name="main")
-cam.start()
-
-server = HTTPServer(('0.0.0.0', PREVIEW_PORT), StreamHandler)
-threading.Thread(target=server.serve_forever, daemon=True).start()
-print(f"[preview] http://0.0.0.0:{PREVIEW_PORT}/stream.mjpg")
-
-# --- Capture handler ---
-def pack_10bit(bayer16: np.ndarray) -> bytes:
-    """Pack uint16 Bayer array → 10-bit packed bytes (4px per 5 bytes)."""
-    flat = bayer16.ravel().astype(np.uint16)
-    # pad to multiple of 4
-    pad = (-len(flat)) % 4
-    if pad:
-        flat = np.concatenate([flat, np.zeros(pad, dtype=np.uint16)])
-    flat = flat.reshape(-1, 4)
-    out = np.zeros((flat.shape[0], 5), dtype=np.uint8)
-    out[:, 0] = (flat[:, 0] >> 2).astype(np.uint8)
-    out[:, 1] = (flat[:, 1] >> 2).astype(np.uint8)
-    out[:, 2] = (flat[:, 2] >> 2).astype(np.uint8)
-    out[:, 3] = (flat[:, 3] >> 2).astype(np.uint8)
-    out[:, 4] = (
-        (flat[:, 0] & 3) |
-        ((flat[:, 1] & 3) << 2) |
-        ((flat[:, 2] & 3) << 4) |
-        ((flat[:, 3] & 3) << 6)
-    ).astype(np.uint8)
-    return out.tobytes()
-
-def do_capture():
-    print("[capture] triggered")
-    t0 = time.perf_counter()
-    # capture_request() grabs one full-res raw frame while preview keeps running
-    request = cam.capture_request()
-    raw_arr = request.make_array("raw")   # numpy uint16, shape (6944, 9248)
-    request.release()
-    t1 = time.perf_counter()
-    print(f"[capture] array in {t1-t0:.2f}s, packing...")
-
-    packed = pack_10bit(raw_arr)
-    t2 = time.perf_counter()
-    print(f"[capture] packed {len(packed)/1e6:.1f}MB in {t2-t1:.2f}s, sending...")
-
-    # Connect to waiting receive_image.py on Windows
-    with socket.create_connection((CAPTURE_HOST, CAPTURE_PORT), timeout=10) as s:
-        s.sendall(packed)
-    t3 = time.perf_counter()
-    print(f"[capture] sent in {t3-t2:.2f}s | total {t3-t0:.2f}s")
-
-# --- Serial command listener ---
-def serial_loop():
-    with serial.Serial(SERIAL_DEV, 115200, timeout=1) as ser:
-        print(f"[serial] listening on {SERIAL_DEV}")
-        while True:
-            line = ser.readline().decode(errors='ignore').strip()
-            if line == "CAPTURE":
-                threading.Thread(target=do_capture, daemon=True).start()
-            elif line == "PING":
-                ser.write(b"PONG\n")
-
-threading.Thread(target=serial_loop, daemon=True).start()
-
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    cam.stop_encoder()
-    cam.stop()
+```c
+{ CCI_REG8(0x4030), 0x00 },
+{ CCI_REG8(0x4031), 0x10 }, /* R offset */
+{ CCI_REG8(0x4032), 0x00 },
+{ CCI_REG8(0x4033), 0x10 }, /* Gr offset */
+{ CCI_REG8(0x4034), 0x00 },
+{ CCI_REG8(0x4035), 0x10 }, /* Gb offset */
+{ CCI_REG8(0x4036), 0x00 },
+{ CCI_REG8(0x4037), 0x10 }, /* B offset */
 ```
 
-**Step 3 — Windows side workflow**
+Start with equal values (`0x10`) across all channels. If the banding shifts color but doesn't disappear, the Gr/Gb rows have a **different offset than R/B** — try bumping `0x4033`/`0x4035` (the green channel offsets) higher until the magenta neutralizes.
 
-```
-VLC opens http://10.42.0.1:8080/stream.mjpg  ← always running, never interrupted
+### 3. Check `0x3208` Group Hold
 
-In terminal A (always running):
-  python receive_image.py --port 9999 --loop --timestamp
+The banding can also occur if register writes during mode switch are **not grouped/held atomically**. Wrap your 64MP-specific register table writes in a group hold:
 
-In terminal B (send capture command):
-  echo CAPTURE > \\.\COM5    # or use a tiny Python script
-```
-
-**Timing profile for Option 1:**
-
-| Stage | Time |
-|---|---|
-| Serial command → Pi receives | ~5ms |
-| `capture_request()` — raw frame from ISP | ~0.5–1.5s (sensor exposure + readout) |
-| 10-bit pack in numpy | ~0.3–0.5s |
-| TCP send 76MB over USB NCM @ ~35 MB/s | ~2.2s |
-| `receive_image.py` unpack + debayer | ~1–2s |
-| **Total command-to-file** | **~4.5–6s** |
-| Preview interruption | **0s** |
-
----
-
-### ⚡ Option 2 — Quick fix (no daemon rewrite): `/dev/shm` + named pipe
-
-If you want to keep `rpicam-raw`/`rpicam-still` and just fix the SD write + stdout bugs:
-
-**Fix 1 — Use RAM instead of SD card:**
-```bash
-# /dev/shm is tmpfs (RAM-backed), ~200MB free on Zero 2W after boot
-rpicam-raw --width 9248 --height 6944 -n 1 -o /dev/shm/frame.raw
-nc -q 1 10.42.0.1 9999 < /dev/shm/frame.raw
-rm /dev/shm/frame.raw
-```
-No SD write. ~200MB headroom is just enough for one 76MB frame.
-
-**Fix 2 — Named pipe to work around stdout seek bug:**
-```bash
-mkfifo /tmp/raw.pipe
-# Start nc reading the pipe FIRST (it'll block until data arrives)
-nc -q 1 10.42.0.1 9999 < /tmp/raw.pipe &
-# Now rpicam-raw writes to the pipe (named pipes are seekable as a fd)
-rpicam-raw --width 9248 --height 6944 -n 1 -o /tmp/raw.pipe
-rm /tmp/raw.pipe
-```
-This may or may not work depending on whether libcamera actually seeks — worth testing immediately since it requires zero new code.
-
-**Fix 3 — UVC restart without Windows losing device:**
-The trick is to keep the USB gadget composite device alive but just swap which function is active, OR freeze the UVC stream with a static frame. The simpler approach: keep `uvc-gadget` running but have it serve a black/static frame while `rpicam-raw` has the camera. This requires patching `uvc-gadget` to accept frames from a pipe rather than directly from V4L2, which is non-trivial.
-
-Easier: just restart the UVC gadget with a 1-second delay and accept the brief re-enum. This is unavoidable unless you go to Option 1.
-
-**Option 2 timing:**
-
-| Stage | Time |
-|---|---|
-| Kill UVC gadget | ~0.1s |
-| rpicam-raw capture to /dev/shm | ~1–2s |
-| nc send 76MB | ~2.2s |
-| Restart UVC gadget + Windows re-enum | ~3–8s |
-| **Total (excl. re-enum)** | ~3.5–4.5s |
-| Preview gap | **4–12s** |
-
----
-
-### 🔧 Option 3 — rpicam-still with quality tradeoff
-
-If raw isn't required and you just want fast JPEG:
-
-```bash
-# Fastest encode: JPEG q=85, hardware-assisted on Pi
-rpicam-still --width 9248 --height 6944 --quality 85 --encoding jpeg -o - | nc -q 1 10.42.0.1 9998
+```c
+{ CCI_REG8(0x3208), 0x00 }, /* Group hold start */
+/* ... all 64MP registers ... */
+{ CCI_REG8(0x3208), 0x10 }, /* Group hold end */
+{ CCI_REG8(0x3208), 0xa0 }, /* Group hold launch */
 ```
 
-~3–4s encode (vs 7s at q=95), ~2–5MB file, ~0.1s transfer. But you lose raw data.
+This ensures the sensor doesn't start a partial frame mid-configuration.
 
----
+### 4. Verify `0x4501` (BLC target)
 
-### Other Issues to Watch
-
-**1. picamera2 raw format on OV64A40**
-The sensor outputs `BGGR10_CSI2P` (10-bit packed, BGGR pattern). Your `receive_image.py` uses `BayerRG2BGR` — you'll need to verify the Bayer order. Check with:
-```python
-cam.camera_properties['ColorFilterArrangement']
-# 0=RGGB, 1=GRBG, 2=BGGR, 3=GBRG
-```
-If it's BGGR, change `COLOR_BayerRG2BGR` → `COLOR_BayerBG2BGR` in `receive_image.py`.
-
-**2. picamera2 raw array dtype**
-`make_array("raw")` returns `uint16` already unpacked on 64-bit OS. You may not need to 10-bit pack/unpack at all — you can send `uint16` directly and adjust `receive_image.py` to read it. This saves ~0.3–0.5s of packing.
-
-**3. USB NCM throughput**
-Zero 2W USB 2.0 High Speed max = 60 MB/s theoretical, ~30–40 MB/s practical for bulk. Your current nc pipeline should saturate this. 76MB ÷ 35 MB/s ≈ 2.2s minimum.
-
-**4. 512MB RAM budget (64-bit)**
-- OS + daemons: ~80MB
-- Camera ISP buffers (2× full-res): ~160MB  
-- `/dev/shm` for raw: ~80MB  
-- Headroom: ~190MB  
-Fine for Option 1 or 2, but don't run anything else heavy.
-
-**5. `capture.sh`** — your uploaded file is empty. Based on the above, here's what it should look like for the Option 2 quick-fix path:
-
-```bash
-#!/bin/bash
-# capture.sh — run on Pi via serial/SSH
-# Captures full-res raw, sends to Windows via nc, no SD card write
-
-WINDOWS_IP="10.42.0.1"
-PORT=9999
-W=9248
-H=6944
-TMP=/dev/shm/frame.raw
-
-echo "[*] Stopping UVC stream..."
-kill $(pgrep uvc-gadget) 2>/dev/null
-sleep 0.3
-
-echo "[*] Capturing raw..."
-rpicam-raw --width $W --height $H -n 1 -t 200 -o $TMP
-
-echo "[*] Sending ${TMP} to ${WINDOWS_IP}:${PORT}..."
-nc -q 1 $WINDOWS_IP $PORT < $TMP
-
-echo "[*] Cleaning up..."
-rm -f $TMP
-
-echo "[*] Restarting UVC stream..."
-uvc-gadget -u /dev/video0 -v /dev/video1 &   # adjust args for your setup
-
-echo "[+] Done"
+```c
+{ CCI_REG8(0x4501), 0x00 }, /* BLC target level */
 ```
 
----
+A non-zero target here shifts the black point and causes banding if it was calibrated for the binned mode.
 
-## Recommendation Path
+## Quick Test
 
-```
-Start here
-    │
-    ▼
-Switch to 64-bit RPiOS Lite  ←── do this regardless of which path
-    │
-    ├─► Test named pipe trick (5 min, zero risk)
-    │       Works? → Option 2 + /dev/shm, ship it
-    │       Fails? → continue
-    │
-    └─► Build Option 1 daemon (1–2 days)
-            Preview never drops, fastest capture path,
-            cleanest long-term architecture
-```
+As a fast sanity check, temporarily write `0x4000 = 0x27` at runtime via `i2cset` while the 64MP stream is running, and see if the banding changes or disappears. If it does, the fix is confirmed to be a BLC configuration issue in the 64MP register table.
 
-The named pipe test is worth trying in the next 10 minutes — if `rpicam-raw` doesn't seek its output fd, you get streaming with zero SD writes and zero code changes to the receive side.
+Citations:
+[1] [ROP_Capture_20260402_172852.jpg](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/images/104774675/f30586eb-a91e-4afc-803b-0ecc2d720da9/ROP_Capture_20260402_172852.jpg?AWSAccessKeyId=ASIA2F3EMEYE7PHE4LQB&Signature=DYoYIs7loq7Q5pq7%2BGOaFkV596I%3D&x-amz-security-token=IQoJb3JpZ2luX2VjEK%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJHMEUCIQDAcuMw6zrjr%2BPToBCwrEJ0nUtoNy8EZGfruO2EWua7hgIgNE0XsyEEUwFk3q%2BYTvmK0jHYdSae74fMkMylCrIU9Y8q8wQIeBABGgw2OTk3NTMzMDk3MDUiDHOmBRG3N3Ak2tgv0irQBJO0ExJV%2BxU5em7ds1ADZNCBcV05Jxq2zuRG4hRcU7wQu8YqT3mFH28qzY70w4v96HK2uk4KAf%2B0nWNbWPdtK6%2B01IcRHGbm98S1JwbpYcFa%2FIhkzraM5k22uF4rJIiDsSaHM59ltHz5lmYbLP0R3HGk1xYfhiucsFN1oAuxF0LBeLvX38K54OXqWn%2FbO%2Br8zE0Qq%2FaOZIiihC6sKld1r9WF%2FIL4BVEiluLhuojLNeYeFAQ14jqVoas3a16u7zqEybZEFR0v9wuPVrmHeHnl3TgsK3RHoflvkt3REIsbLqZkaUgdsjR1kZmvyQSZAa7ldTj3hND%2FMA811CVN%2BEi7lS9YSVD91n7jZTA8BPFJU4TqguiXfZe8o7i%2FHksQtzOtA5aRVd18O7AA8H2u63PcBNXnrFm1gdFRJg3jDRRkjNZHd6Fu4LbPjXlmxMk1WcbOQew5rkvTn4GmhOz5D35YselnHfdgcOPYXUqDxyYwW8qz87v90iq6ikATWIw83nfDxXTzk1XPtvBvAVSd6GqPf5AZJVAvYKPCnXEJ%2F6k%2BKFKu9T1WOlKba%2FGbzpiPQ4352RWjstCHD%2BhtpDdWsVkICmCakGDHGCChW7S4i6DXFcbiHcTtuimyVJ6P23R%2BFihP0MOFGKEDXkyWLrNUMExE4Qf97n6qoHtbEKVN3tEZGyIXGlP9WveSyj5e1guB%2Bi%2FW00y%2FAiIUyBLDIN6lUE8aisL0gLtxVr57iUwSFXJD%2Fl%2BSvpXzdY5dFXsJfSOfQy4oDWS55KdZILz3k6RujBOf77Yw59u7zgY6mAEK6wPLe8M9a%2BXWxUAYLvgeKLieUqjvyM7WpoNZvI9qrUyAkmTXrCobrHOPIkycE5RGJU2Hmq7FXt4mcmxBT0cFM3FM4ih2aerSLNh7PP304F9kvKicdN3Y3TXQa%2F9d3iqmgPH6cs%2B1shyeVCMEAHwHuNEsCnIv5zJzcYL8%2BnKBB9%2FNdpQCoGqEUoNJMoftut0fWIi%2B3XL9Zw%3D%3D&Expires=1775169599)  
+[2] [ROP_Capture_20260402_172352-2.jpg](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/images/104774675/5c39da41-cd3a-4d68-874c-9685341d62c4/ROP_Capture_20260402_172352-2.jpg?AWSAccessKeyId=ASIA2F3EMEYE7PHE4LQB&Signature=GZKTntjMhfHyASK2fpyb0xIApVM%3D&x-amz-security-token=IQoJb3JpZ2luX2VjEK%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJHMEUCIQDAcuMw6zrjr%2BPToBCwrEJ0nUtoNy8EZGfruO2EWua7hgIgNE0XsyEEUwFk3q%2BYTvmK0jHYdSae74fMkMylCrIU9Y8q8wQIeBABGgw2OTk3NTMzMDk3MDUiDHOmBRG3N3Ak2tgv0irQBJO0ExJV%2BxU5em7ds1ADZNCBcV05Jxq2zuRG4hRcU7wQu8YqT3mFH28qzY70w4v96HK2uk4KAf%2B0nWNbWPdtK6%2B01IcRHGbm98S1JwbpYcFa%2FIhkzraM5k22uF4rJIiDsSaHM59ltHz5lmYbLP0R3HGk1xYfhiucsFN1oAuxF0LBeLvX38K54OXqWn%2FbO%2Br8zE0Qq%2FaOZIiihC6sKld1r9WF%2FIL4BVEiluLhuojLNeYeFAQ14jqVoas3a16u7zqEybZEFR0v9wuPVrmHeHnl3TgsK3RHoflvkt3REIsbLqZkaUgdsjR1kZmvyQSZAa7ldTj3hND%2FMA811CVN%2BEi7lS9YSVD91n7jZTA8BPFJU4TqguiXfZe8o7i%2FHksQtzOtA5aRVd18O7AA8H2u63PcBNXnrFm1gdFRJg3jDRRkjNZHd6Fu4LbPjXlmxMk1WcbOQew5rkvTn4GmhOz5D35YselnHfdgcOPYXUqDxyYwW8qz87v90iq6ikATWIw83nfDxXTzk1XPtvBvAVSd6GqPf5AZJVAvYKPCnXEJ%2F6k%2BKFKu9T1WOlKba%2FGbzpiPQ4352RWjstCHD%2BhtpDdWsVkICmCakGDHGCChW7S4i6DXFcbiHcTtuimyVJ6P23R%2BFihP0MOFGKEDXkyWLrNUMExE4Qf97n6qoHtbEKVN3tEZGyIXGlP9WveSyj5e1guB%2Bi%2FW00y%2FAiIUyBLDIN6lUE8aisL0gLtxVr57iUwSFXJD%2Fl%2BSvpXzdY5dFXsJfSOfQy4oDWS55KdZILz3k6RujBOf77Yw59u7zgY6mAEK6wPLe8M9a%2BXWxUAYLvgeKLieUqjvyM7WpoNZvI9qrUyAkmTXrCobrHOPIkycE5RGJU2Hmq7FXt4mcmxBT0cFM3FM4ih2aerSLNh7PP304F9kvKicdN3Y3TXQa%2F9d3iqmgPH6cs%2B1shyeVCMEAHwHuNEsCnIv5zJzcYL8%2BnKBB9%2FNdpQCoGqEUoNJMoftut0fWIi%2B3XL9Zw%3D%3D&Expires=1775169599)
