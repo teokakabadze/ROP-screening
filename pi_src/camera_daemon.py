@@ -102,6 +102,16 @@ cam = None
 video_config = None
 still_config = None   # pre-created in main(); rebuilt by CMD:MODE
 _capture_size = (6944, 6944)  # (w, h); updated by CMD:MODE:16MP/48MP
+
+# Exposure boost applied when locking AE for still capture.
+# Preview uses a heavily-binned sensor mode; still modes have less/no binning,
+# so the same ET+AG values underexpose the still. Prefer boosting AnalogueGain
+# (no extra frame time); ExposureTime only extended if AG hits the sensor ceiling.
+# Tune empirically: if still looks too bright/dark, adjust these values.
+_STILL_AE_BOOST = {
+    (4624, 3472): 2.5,   # 16MP (2×2 binned): ~2-stop loss vs preview
+    (6944, 6944): 5.0,   # 48MP (full res):   ~3-4 stop loss vs preview
+}
 output = StreamOutput()
 # Protects camera from concurrent access between preview thread and capture
 _cam_lock = threading.Lock()
@@ -310,9 +320,21 @@ def do_capture():
             _crop_x = (_sw - _sh) // 2   # = (9248-6944)//2 = 1152
             _ctrl["ScalerCrop"] = (_crop_x, 0, _sh, _sh)
         if meta is not None:
+            _boost   = _STILL_AE_BOOST.get(_capture_size, 1.0)
+            _ag_raw  = meta["AnalogueGain"]
+            _et_raw  = meta["ExposureTime"]
+            _ag_max  = cam.camera_controls.get("AnalogueGain", (1.0, 64.0, 1.0))[1]
+            _ag_out  = min(_ag_raw * _boost, _ag_max)
+            # Only extend ET if gain headroom was exhausted
+            _et_out  = int(_et_raw * (_ag_raw * _boost) / _ag_out)
+            log.info(
+                f"Capture: AE boost ×{_boost} → "
+                f"AG {_ag_raw:.2f}→{_ag_out:.2f}  "
+                f"ET {_et_raw}→{_et_out}µs"
+            )
             _ctrl["AeEnable"]    = False
-            _ctrl["ExposureTime"] = meta["ExposureTime"]
-            _ctrl["AnalogueGain"] = meta["AnalogueGain"]
+            _ctrl["ExposureTime"] = _et_out
+            _ctrl["AnalogueGain"] = _ag_out
             _ctrl["AwbEnable"]   = False
             _ctrl["ColourGains"] = colour_gains
         _still_cfg["controls"] = _ctrl
