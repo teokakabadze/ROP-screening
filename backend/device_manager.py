@@ -12,7 +12,7 @@ Protocol (text lines, newline-terminated):
 """
 
 import threading
-from PySide6.QtCore import QObject, Signal, Slot, QTimer
+from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer
 from PySide6.QtSerialPort import QSerialPort, QSerialPortInfo
 
 
@@ -43,6 +43,7 @@ class DeviceManager(QObject):
     brightnessChanged = Signal(int)
     buttonPressed    = Signal()
     statusReceived   = Signal(str)
+    captureModeChanged = Signal(str)
     _portFound       = Signal(str)   # internal: port name found in background thread
 
     def __init__(self, parent=None, mode="48mp"):
@@ -123,6 +124,20 @@ class DeviceManager(QObject):
     @Slot(int)
     def setBrightness(self, value: int):
         self._write(f"CMD:BRIGHTNESS:{max(0, min(100, value))}")
+
+    @Slot(str)
+    def setMode(self, mode: str):
+        """Switch capture resolution: '16mp' or '48mp'."""
+        mode = mode.lower()
+        if mode not in ("16mp", "48mp"):
+            return
+        self._mode = mode
+        self._write(f"CMD:MODE:{mode.upper()}")
+        self.captureModeChanged.emit(self._mode)
+
+    @Property(str, notify=captureModeChanged)
+    def captureMode(self):
+        return self._mode
 
     def _write(self, cmd: str):
         if self._port.isOpen():

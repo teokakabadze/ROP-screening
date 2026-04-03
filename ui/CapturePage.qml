@@ -60,13 +60,64 @@ Item {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
  
-                            CameraFeed { 
+                            CameraFeed {
                                 anchors.fill: parent
                                 // toggle sidebar button
-                                ToggleButton { 
+                                ToggleButton {
                                     anchors.right: parent.right
                                     anchors.top: parent.top
                                     anchors.margins: 10
+                                }
+
+                                // resolution mode toggle — top-left of camera feed
+                                Rectangle {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    anchors.margins: 10
+                                    width: 108; height: 33
+                                    radius: 6
+                                    color: "#2c3e50"
+                                    opacity: 0.75
+
+                                    Row {
+                                        anchors.fill: parent
+                                        anchors.margins: 3
+                                        spacing: 2
+
+                                        Rectangle {
+                                            width: (parent.width - 2) / 2
+                                            height: parent.height
+                                            radius: 4
+                                            color: deviceManager.captureMode === "16mp" ? "white" : "transparent"
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "16 MP"
+                                                font.pixelSize: 11; font.bold: true
+                                                color: deviceManager.captureMode === "16mp" ? "#2c3e50" : "white"
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: deviceManager.setMode("16mp")
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            width: (parent.width - 2) / 2
+                                            height: parent.height
+                                            radius: 4
+                                            color: deviceManager.captureMode === "48mp" ? "white" : "transparent"
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "64 MP"
+                                                font.pixelSize: 11; font.bold: true
+                                                color: deviceManager.captureMode === "48mp" ? "#2c3e50" : "white"
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: deviceManager.setMode("48mp")
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
