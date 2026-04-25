@@ -10,141 +10,135 @@ import "Strings.js" as Tr
 
 Item {
     id: captureRoot
+    objectName: "CapturePage"
     property bool sideBarOpen: true
 
-    ColumnLayout {
+    // 1. THE BLUE ACTIVE INDICATOR
+    // This sits at the very top to meet the toolbar seamlessly
+    Rectangle {
+        id: activeTabLine
+        z: 10 
+        width: 85 
+        height: 3
+        color: "#0070c0"
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.leftMargin: 56 // Aligns with Toolbar
+    }
+
+    // 2. THE MAIN PAGE BACKGROUND
+    // Setting this to #f8fafc removes the "black line" gap
+    Rectangle {
         anchors.fill: parent
+        color: "#f8fafc" 
 
-        // title header
-        CaptureHeader { 
-            Layout.fillWidth: true
-            Layout.preferredHeight: 60
-        }
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 0 // Eliminates gaps between layout elements
 
-        // live camera feed and patient data sidebar
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-
+            // Main Workspace
             RowLayout {
-                anchors.fill: parent
-                
-                // camera feed and toggle button
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 0
+
+                // --- CAMERA FEED SECTION ---
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.preferredWidth: sideBarOpen ? parent.width * 0.7 : parent.width
-                    Layout.leftMargin: 20
-                    Layout.bottomMargin: 10
-                    radius: 9
-                    color: '#f3fcff'
-
-                    border.color: '#baddfa' 
-                    border.width: 1
                     
-                    // glow effect
-                    layer.enabled: true
-                    layer.effect: MultiEffect {
-                        shadowEnabled: true
-                        shadowColor: '#42007bff' 
-                        shadowBlur: 1.0
-                        shadowHorizontalOffset: -2 // Pushes the shadow to the left
-                    }
+                    // Added margins here so the "Card" looks like it's floating on the gray background
+                    Layout.leftMargin: 20
+                    Layout.rightMargin: 10
+                    Layout.topMargin: 15
+                    Layout.bottomMargin: 15
+                    
+                    radius: 12
+                    color: '#ffffff'
+                    border.color: '#e2e8f0' // Softer border color for a modern look
+                    border.width: 1
 
-                    RowLayout {
+                    // Internal Camera Feed Layout
+                    Item {
                         anchors.fill: parent
                         anchors.margins: 10
 
-                        Rectangle {
-                            id: cameraContainer
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
- 
-                            CameraFeed {
-                                anchors.fill: parent
-                                // toggle sidebar button
-                                ToggleButton {
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    anchors.margins: 10
-                                }
+                        CameraFeed {
+                            id: liveFeed
+                            anchors.fill: parent
+                            
+                            // Resolution toggle (Top Left)
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                anchors.margins: 10
+                                width: 110; height: 34
+                                radius: 6
+                                color: "#2c3e50"
+                                opacity: 0.8
 
-                                // resolution mode toggle — top-left of camera feed
-                                Rectangle {
-                                    anchors.left: parent.left
-                                    anchors.top: parent.top
-                                    anchors.margins: 10
-                                    width: 108; height: 33
-                                    radius: 6
-                                    color: "#2c3e50"
-                                    opacity: 0.75
+                                Row {
+                                    anchors.fill: parent
+                                    anchors.margins: 2
+                                    spacing: 1
 
-                                    Row {
-                                        anchors.fill: parent
-                                        anchors.margins: 3
-                                        spacing: 2
-
-                                        Rectangle {
-                                            width: (parent.width - 2) / 2
-                                            height: parent.height
-                                            radius: 4
-                                            color: deviceManager.captureMode === "16mp" ? "white" : "transparent"
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: "16 MP"
-                                                font.pixelSize: 11; font.bold: true
-                                                color: deviceManager.captureMode === "16mp" ? "#2c3e50" : "white"
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                onClicked: deviceManager.setMode("16mp")
-                                            }
+                                    Rectangle {
+                                        width: (parent.width / 2) - 1; height: parent.height
+                                        radius: 4
+                                        color: deviceManager.captureMode === "16mp" ? "white" : "transparent"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "16 MP"; font.pixelSize: 11; font.bold: true
+                                            color: deviceManager.captureMode === "16mp" ? "#2c3e50" : "white"
                                         }
-
-                                        Rectangle {
-                                            width: (parent.width - 2) / 2
-                                            height: parent.height
-                                            radius: 4
-                                            color: deviceManager.captureMode === "48mp" ? "white" : "transparent"
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: "64 MP"
-                                                font.pixelSize: 11; font.bold: true
-                                                color: deviceManager.captureMode === "48mp" ? "#2c3e50" : "white"
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                onClicked: deviceManager.setMode("48mp")
-                                            }
+                                        MouseArea { anchors.fill: parent; onClicked: deviceManager.setMode("16mp") }
+                                    }
+                                    Rectangle {
+                                        width: (parent.width / 2) - 1; height: parent.height
+                                        radius: 4
+                                        color: deviceManager.captureMode === "48mp" ? "white" : "transparent"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "64 MP"; font.pixelSize: 11; font.bold: true
+                                            color: deviceManager.captureMode === "48mp" ? "#2c3e50" : "white"
                                         }
+                                        MouseArea { anchors.fill: parent; onClicked: deviceManager.setMode("48mp") }
                                     }
                                 }
                             }
 
-                            // brightness slider (controls Pi camera exposure)
-                            BrightnessControl {
-                                anchors.left: parent.left
+                            ToggleButton {
                                 anchors.right: parent.right
-                                anchors.bottom: captureBtn.top
-                                anchors.margins: 10
-                                height: 28
-                            }
-
-                            // capture button
-                            CaptureButton {
-                                id: captureBtn
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.bottom: parent.bottom
-                                width: parent.width * 0.95
-                                height: 38
+                                anchors.top: parent.top
                                 anchors.margins: 10
                             }
                         }
+
+                        BrightnessControl {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: captureBtn.top
+                            anchors.bottomMargin: 10
+                            height: 28
+                        }
+
+                        CaptureButton {
+                            id: captureBtn
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.bottom: parent.bottom
+                            width: parent.width * 0.95
+                            height: 40
+                            anchors.margins: 5
+                        }
                     }
                 }
-                // patient data sidebar
+
+                // --- SIDEBAR SECTION ---
                 PatientDataSidebar {
                     Layout.fillHeight: true
+                    Layout.preferredWidth: 320
+                    visible: sideBarOpen
                 }
             }
         }

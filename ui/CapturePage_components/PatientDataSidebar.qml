@@ -46,11 +46,28 @@ Rectangle {
                     anchors.margins: 15
                     spacing: 12
 
-                    DataField { label: "patientID"; value: "ROP-DEMO-001"; valueColor: "#007bff" }
-                    DataField { label: "patientName"; value: "John Doe" }
-                    DataField { label: "age"; value: "28 " + Tr.get("week", window.currentLang) }
-                    DataField { label: "weight"; value: "1500 g" }
-                    DataField { label: "screeningDate"; value: "3/10/2026" }
+                    DataField { 
+                        label: "patientID"
+                        // If activePatient exists, show the ID. Otherwise, show "N/A"
+                        value: activePatient ? activePatient.patientId : "---" 
+                        valueColor: "#007bff" 
+                    }
+                    DataField { 
+                        label: "patientName"
+                        value: activePatient ? activePatient.name : "Select Patient" 
+                    }
+                    DataField { 
+                        label: "age"
+                        value: activePatient ? activePatient.gestation : "---" 
+                    }
+                    DataField { 
+                        label: "weight"
+                        value: activePatient ? activePatient.weight : "---" 
+                    }
+                    DataField { 
+                        label: "screeningDate"
+                        value: activePatient ? activePatient.date : "---" 
+                    }
                 }
             }
         }
