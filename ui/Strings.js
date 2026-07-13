@@ -1,6 +1,6 @@
 var data = {
     "EN": {
-        "appTitle": "ROP Screening",
+        "appTitle": "Retinex",
         "appSubtitle": "Retinopathy of Prematurity Detection",
         "captureButton": "Capture Image",
         "hideButton": "Hide →",
@@ -14,9 +14,11 @@ var data = {
         "recentCaptures": "Recent Captures",
         "noCaptures": "No images captured yet",
         "week": "weeks",
+        "patients": "Patients",
+        "capture": "Capture",
     },
     "SW": {
-        "appTitle": "Upimaji ROP",
+        "appTitle": "Retinex",
         "appSubtitle": "Ugonjwa wa Retina kwa Watoto Njiti",
         "captureButton": "Piga Picha",
         "hideButton": "Ficha →",
@@ -30,6 +32,8 @@ var data = {
         "recentCaptures": "Picha Zilizopigwa Hivi Karibuni",
         "noCaptures": "Hakuna picha zilizopigwa bado",
         "week": "wiki",
+        "patients": "Wagonjwa",
+        "capture": "Piga",
     }
 }
 

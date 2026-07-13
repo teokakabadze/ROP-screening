@@ -112,6 +112,9 @@ class ReceiveImageProcess:
         self._proc = None
 
     def start(self):
+        if self._proc is not None and self._proc.poll() is None:
+            print("[receive_image] start() called but already running — skipping", flush=True)
+            return
         captures_dir = Path(__file__).parent / "captures"
         captures_dir.mkdir(exist_ok=True)
         script = Path(__file__).parent / "receive_image.py"
@@ -125,11 +128,13 @@ class ReceiveImageProcess:
                 "--height", str(CAPTURE_H),
                 "--out",    str(out_template),
             ],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             env={**os.environ, "PYTHONUTF8": "1"},
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         threading.Thread(target=self._read_output, daemon=True).start()
         print(f"[receive_image] started (PID {self._proc.pid})", flush=True)
@@ -155,6 +160,14 @@ class ReceiveImageProcess:
         if last_was_progress:
             print()
         print("[receive_image] process exited", flush=True)
+
+    def stop(self):
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
 
 
 # ── Capture manager ───────────────────────────────────────────────────────────
@@ -183,6 +196,7 @@ class CameraManager(QObject):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    os.environ["QSG_RHI_BACKEND"] = "opengl"   # D3D11 OOMs on continuous MJPEG texture uploads
     app = QGuiApplication(sys.argv)
     os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
     engine = QQmlApplicationEngine()
@@ -214,8 +228,18 @@ def main():
     receive_proc.start()
 
     print("ROP App started.", flush=True)
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    receive_proc.stop()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback, datetime
+        log_path = Path(__file__).parent / "retinex_crash.log"
+        with open(log_path, "w", encoding="utf-8") as _f:
+            _f.write(str(datetime.datetime.now()) + "\n")
+            traceback.print_exc(file=_f)
+        raise
